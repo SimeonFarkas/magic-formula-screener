@@ -21,6 +21,27 @@
             <version>5.11.4</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- PostgreSQL JDBC Driver: Translates Java calls into the PostgreSQL network protocol -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.3</version>
+        </dependency>
+
+        <!-- Flyway Core: The schema migration engine -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>10.11.0</version>
+        </dependency>
+
+        <!-- Flyway PostgreSQL Extension: Required in Flyway 10+ for PostgreSQL dialect support -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>10.11.0</version>
+        </dependency>
     </dependencies>
 
     <build>
