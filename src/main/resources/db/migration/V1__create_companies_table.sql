@@ -1,0 +1,13 @@
+CREATE TABLE companies (
+    id BIGSERIAL PRIMARY KEY,
+    ticker VARCHAR(12) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    sector VARCHAR(100),
+    industry VARCHAR(100),
+    currency VARCHAR(3) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_companies_sector ON companies(sector);
