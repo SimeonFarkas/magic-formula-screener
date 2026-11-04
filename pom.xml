@@ -59,6 +59,21 @@
                 <version>3.5.2</version>
             </plugin>
 
+            <!-- Exec plugin: fork a clean JVM so Flyway isn't tangled in Maven's classloader -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <executable>java</executable>
+                    <arguments>
+                        <argument>-classpath</argument>
+                        <classpath/>
+                        <argument>io.github.simeonfarkas.Main</argument>
+                    </arguments>
+                </configuration>
+            </plugin>
+
             <!-- Flyway Maven Plugin -->
             <plugin>
                 <groupId>org.flywaydb</groupId>
