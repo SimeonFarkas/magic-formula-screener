@@ -1,4 +1,4 @@
-up# Magic formula screener
+# Magic formula screener
 Application that automates stock screening on the Stockholm Stock Exchange (Nasdaq Stockholm) based on Joel Greenblatt's investment strategy, "The Magic Formula".
 
 ## Quickstart
