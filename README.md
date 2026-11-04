@@ -1,10 +1,16 @@
-# Magic formula screener
+up# Magic formula screener
 Application that automates stock screening on the Stockholm Stock Exchange (Nasdaq Stockholm) based on Joel Greenblatt's investment strategy, "The Magic Formula".
 
 ## Quickstart
 The local database is PostgreSQL inside a Docker-container. Before running the program start the container with the following in the terminal:
 ```bash
 docker compose up -d
+
+# 1. Start the client
+./start-db-client.sh
+
+# 2. List tables
+\dt
 ```
 When you are done with the program, shut down the Docker-container with:
 ```bash
