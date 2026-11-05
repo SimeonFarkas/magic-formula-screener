@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 export POSTGRES_USER="postgres"
-
 export POSTGRES_PASSWORD="postgres"
+export POSTGRES_DB="magic_formula_dev"
 
 #docker exec -i mfs-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < src/main/resources/db/migration/V1__create_companies_table.sql
 
