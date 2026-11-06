@@ -14,7 +14,54 @@
     </properties>
 
     <dependencies>
-        <!-- Unit Testing Framework -->
+        <!-- =================================================================== -->
+        <!-- Database & Connection Pooling                                       -->
+        <!-- =================================================================== -->
+        <!-- PostgreSQL JDBC Driver -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.3</version>
+        </dependency>
+
+        <!-- HikariCP: High-performance JDBC connection pool -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>5.1.0</version>
+        </dependency>
+
+        <!-- =================================================================== -->
+        <!-- Database Migrations                                                 -->
+        <!-- =================================================================== -->
+        <!-- Flyway Core: Schema migration engine -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>10.11.0</version>
+        </dependency>
+
+        <!-- Flyway PostgreSQL Extension (required for Flyway 10+) -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>10.11.0</version>
+        </dependency>
+
+        <!-- =================================================================== -->
+        <!-- Logging                                                             -->
+        <!-- =================================================================== -->
+        <!-- Logback Classic: SLF4J native implementation -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.5.16</version>
+        </dependency>
+
+        <!-- =================================================================== -->
+        <!-- Testing                                                             -->
+        <!-- =================================================================== -->
+        <!-- JUnit 5 Jupiter API & Engine -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -22,44 +69,44 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- PostgreSQL JDBC Driver: Translates Java calls into the PostgreSQL network protocol -->
+        <!-- AssertJ: Fluent assertions framework -->
         <dependency>
-            <groupId>org.postgresql</groupId>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.26.3</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Testcontainers: Disposable PostgreSQL instance for integration tests -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.7.3</version>
+            <version>1.20.4</version>
+            <scope>test</scope>
         </dependency>
 
-        <!-- Flyway Core: The schema migration engine -->
+        <!-- Testcontainers: JUnit 5 integration extension -->
         <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
-            <version>10.11.0</version>
-        </dependency>
-
-        <!-- Flyway PostgreSQL Extension: Required in Flyway 10+ for PostgreSQL dialect support -->
-        <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-database-postgresql</artifactId>
-            <version>10.11.0</version>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <!-- Compiler plugin configured for JDK 21 -->
+            <!-- =============================================================== -->
+            <!-- Compilation & Execution                                         -->
+            <!-- =============================================================== -->
+            <!-- Compiles source code with target JDK 21 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
             </plugin>
-            <!-- Surefire plugin to execute JUnit 5 tests via 'mvn test' -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
-            </plugin>
 
-            <!-- Exec plugin: fork a clean JVM so Flyway isn't tangled in Maven's classloader -->
+            <!-- Executes main class in an isolated JVM -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
@@ -74,7 +121,20 @@
                 </configuration>
             </plugin>
 
-            <!-- Flyway Maven Plugin -->
+            <!-- =============================================================== -->
+            <!-- Test Runners                                                    -->
+            <!-- =============================================================== -->
+            <!-- Runs JUnit 5 test suites during 'mvn test' -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+
+            <!-- =============================================================== -->
+            <!-- Database Tooling                                                -->
+            <!-- =============================================================== -->
+            <!-- Flyway Maven Plugin for CLI-driven migrations -->
             <plugin>
                 <groupId>org.flywaydb</groupId>
                 <artifactId>flyway-maven-plugin</artifactId>
@@ -89,6 +149,11 @@
                 </configuration>
                 <dependencies>
                     <dependency>
+                        <groupId>org.postgresql</groupId>
+                        <artifactId>postgresql</artifactId>
+                        <version>42.7.3</version>
+                    </dependency>
+                    <dependency>
                         <groupId>org.flywaydb</groupId>
                         <artifactId>flyway-database-postgresql</artifactId>
                         <version>10.11.0</version>
@@ -97,5 +162,4 @@
             </plugin>
         </plugins>
     </build>
-
 </project>
