@@ -40,16 +40,16 @@ class JdbcCompanyRepositoryTest {
     }
 
     @Test
-    void shouldUpsertAndHandleDuplicatesIdempotently() {
+    void should_Upsert_And_Handle_Duplicates_Idempotently() {
        Company comp1 = Company.create("VOLV-B", "Volvo AB", "SE0000115446",
                new BigDecimal("500000000"), "Industrials", "Auto", "SEK");
 
        repository.upsertBatch(List.of(comp1));
 
        //Verify that the company is saved
-        Optional<Company> fetched = repository.findByTicker("VOLVO-B");
+        Optional<Company> fetched = repository.findByTicker("VOLV-B");
         assertTrue(fetched.isPresent());
-        assertEquals("Volvo B", fetched.get().name());
+        assertEquals("Volvo AB", fetched.get().name());
 
         //Upsert with updated name and market cap
         Company updatedComp1 = Company.create("VOLV-B", "Volvo Group AB", "SE0000115446",
