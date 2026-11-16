@@ -127,7 +127,7 @@ public class JdbcFinancialMetricsRepository implements FinancialMetricsRepositor
         } catch (SQLException e) {
             throw new RuntimeException("Couldn't get financial history for company_id: " + companyId, e);
         }
-        return List.of();
+        return result;
     }
 
     private void setNullableBigDecimal(PreparedStatement ps, int paramIndex, BigDecimal value) throws SQLException {
