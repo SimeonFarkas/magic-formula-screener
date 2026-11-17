@@ -65,6 +65,23 @@
         </dependency>
 
         <!-- =================================================================== -->
+        <!-- JSON Serialization & Deserialization                                -->
+        <!-- =================================================================== -->
+        <!-- Jackson Databind: Core JSON to Java object mapping -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.16.1</version>
+        </dependency>
+
+        <!-- Jackson JSR-310: Support for Java 8+ date/time types (LocalDate, Instant) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>2.16.1</version>
+        </dependency>
+
+        <!-- =================================================================== -->
         <!-- Testing                                                             -->
         <!-- =================================================================== -->
         <!-- JUnit 5 Jupiter API & Engine -->
