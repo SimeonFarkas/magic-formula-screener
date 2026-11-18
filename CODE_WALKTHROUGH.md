@@ -24,14 +24,16 @@
 - `JdbcFinancialMetricsRepository.java` — JDBC batch upserts and queries for `financial_metrics`.
 
 ### 6. External API Client & Mappers
-- `CompanyProfileDto.java` — How Jackson deserializes external company profile JSON payloads into an immutable record.
-- `FinancialReportDto.java` — How Jackson deserializes raw balance sheet and income statement JSON fields.
-- `CompanyMapper.java` — How raw profile DTOs are cleaned (such as stripping `.ST` ticker suffixes) and mapped to `Company`.
-- `FinancialMetricsMapper.java` — How report DTOs and `Company` data are combined to compute `enterpriseValue` and create `FinancialMetrics`.
-- `StockDataApiClient.java` — Line-by-line breakdown of Java 21's `HttpClient`, Jackson deserialization, and error handling.
+- `RoicListResponse.java` — Generic wrapper for handling ROIC.AI's `{"data": [...]}` JSON list structures.
+- `CompanyProfileDto.java`, `IncomeStatementDto.java`, `BalanceSheetDto.java`, `ValuationMultipleDto.java` — How Jackson deserializes ROIC.AI's raw JSON payloads into immutable records.
+- `CompanyMapper.java` — How raw profile DTOs are cleaned (stripping `STO:`) and mapped to `Company`.
+- `FinancialMetricsMapper.java` — How the three financial report DTOs are combined to compute `enterpriseValue` and create `FinancialMetrics`.
+- `StockDataApiClient.java` — Line-by-line breakdown of Java 21's `HttpClient`, Jackson deserialization, rate limiting (12.5s pauses), and error handling.
 
 ### 7. Tests
 - `JdbcCompanyRepositoryTest.java` — How Testcontainers spins up a temporary Postgres DB to test our SQL.
+
+---
 
 <details>
 <summary><h2 style="display: inline;">1. Infrastructure & Setup</h2></summary>
@@ -75,7 +77,6 @@ Instead of writing everything from scratch, Maven downloads these ready-made too
 
 #### 3. Build Plugins (Maven Commands)
 Plugins add actions you can trigger from the terminal or IntelliJ:
-
 - **`maven-compiler-plugin`** — Translates your `.java` files into runnable Java 21 bytecode.
 - **`exec-maven-plugin`** — Lets you run `io.github.simeonfarkas.Main` directly with `mvn exec:java`, automatically including all downloaded dependencies.
 - **`maven-surefire-plugin`** — Runs your JUnit 5 test suite when you execute `mvn test`, and sets `-Dapi.version=1.44` so Testcontainers communicates smoothly with Docker.
@@ -87,297 +88,120 @@ Plugins add actions you can trigger from the terminal or IntelliJ:
 <summary><h2 style="display: inline;">2. Database Migrations</h2></summary>
 
 ### 2.1 `V1__create_companies_table.sql`:
-This is the first Flyway migration script. When the application starts up, Flyway runs this file once to build the `companies` table in PostgreSQL where all Nasdaq Stockholm listed companies are stored. *(Note the `V1__` prefix with two underscores—Flyway requires this naming format to track which scripts have already been applied.)*
+This is the first Flyway migration script. When the application starts up, Flyway runs this file once to build the `companies` table in PostgreSQL where all Nasdaq Stockholm listed companies are stored.
 #### Column-by-Column Breakdown
-
-- **`id BIGSERIAL PRIMARY KEY`** — Automatically generates a unique, auto-incrementing number (`1, 2, 3...`) for every company saved. `BIGSERIAL` uses a 64-bit integer (`Long` in Java), and `PRIMARY KEY` marks it as the table's official unique row ID.
-- **`ticker VARCHAR(12) NOT NULL UNIQUE`** — Stores the stock symbol (such as `VOLV-B` or `ERIC-B`), up to 12 characters. `NOT NULL` means every row must have a ticker, and `UNIQUE` prevents duplicate companies—which is also what enables `ON CONFLICT (ticker) DO UPDATE` during batch upserts.
-- **`name VARCHAR(255) NOT NULL`** — Stores the company's full name (up to 255 characters) and requires it to always be filled in.
-- **`sector VARCHAR(100)` & `industry VARCHAR(100)`** — Optional text fields for categorizing what the company does (for example, `Industrials` or `Financials`). Allowing empty (`NULL`) values ensures an import won't fail if a company is missing classification data, and `sector` will later help filter out financial and utility stocks for the Magic Formula.
-- **`currency VARCHAR(3) NOT NULL`** — Stores the 3-letter currency code (such as `SEK` or `EUR`) that the stock trades in.
-- **`is_active BOOLEAN NOT NULL DEFAULT TRUE`** — A `true`/`false` flag tracking whether the company is still actively listed on the exchange. It defaults to `TRUE` automatically whenever a new company is inserted.
-- **`created_at` & `updated_at` (`TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP`)** — Automatically records the exact date and time (including timezone) when a row was first created and last modified.
+- **`id BIGSERIAL PRIMARY KEY`** — Automatically generates a unique, auto-incrementing number (`1, 2, 3...`) for every company saved.
+- **`ticker VARCHAR(12) NOT NULL UNIQUE`** — Stores the stock symbol (such as `VOLV-B`). `UNIQUE` prevents duplicate companies and enables `ON CONFLICT (ticker) DO UPDATE`.
+- **`name VARCHAR(255) NOT NULL`** — Stores the company's full name.
+- **`sector VARCHAR(100)` & `industry VARCHAR(100)`** — Optional text fields for categorizing what the company does, useful for filtering out financial and utility stocks later.
+- **`currency VARCHAR(3) NOT NULL`** — Stores the 3-letter currency code (such as `SEK`).
+- **`is_active BOOLEAN NOT NULL DEFAULT TRUE`** — Tracks whether the company is still actively listed on the exchange.
+- **`created_at` & `updated_at`** — Automatically records the exact date and time a row was created and modified.
 
 #### Index
-
-- **`CREATE INDEX idx_companies_sector ON companies(sector);`** — Builds a fast lookup shortcut on the `sector` column so PostgreSQL can filter companies by sector without scanning every single row in the table.
+- **`CREATE INDEX idx_companies_sector ON companies(sector);`** — Builds a fast lookup shortcut on the `sector` column.
 
 ### 2.2 `V2__create_company_and_metric_tables.sql`:
-
-This second Flyway migration updates your database schema after `V1`. Once Flyway runs a migration file, you should never edit it—doing so breaks Flyway's checksum validation. Instead, you create a new numbered script (`V2__...`) to safely evolve the database. *(The `IF NOT EXISTS` clauses act as a safety net so the script won't crash if a column, table, or index was already created.)*
+This second Flyway migration updates your database schema after `V1`.
 
 #### 1. Extending the `companies` Table (`ALTER TABLE`)
-
-- **`isin VARCHAR(12)`** — Adds the company's International Securities Identification Number (a standard 12-character global ID like `SE0000115446`). Tickers can vary between websites, so an ISIN helps reliably match the same company across different data sources.
-- **`market_cap NUMERIC(20, 2)`** — Stores the company's total market value. `NUMERIC(20, 2)` holds up to 20 digits total with 2 decimal places (mapping to `BigDecimal` in Java), preventing the rounding errors you would get with `double` or `float`.
+- **`isin VARCHAR(12)`** — Adds the company's ISIN (a standard 12-character global ID) to reliably match the same company across different data sources.
+- **`market_cap NUMERIC(20, 2)`** — Stores the company's total market value using exact decimal precision (`BigDecimal` in Java).
 
 #### 2. Creating the `financial_metrics` Table (`CREATE TABLE`)
-
-This table holds the financial statement numbers needed to calculate **The Magic Formula** for each company:
-
-- **`id BIGSERIAL PRIMARY KEY`** — Auto-incrementing unique ID (`Long` in Java) for each row of metrics.
-- **`company_id BIGINT NOT NULL`** — Stores the `id` of the company these numbers belong to, connecting this row to the `companies` table.
-- **`report_date DATE NOT NULL`** — The date of the financial report (`LocalDate` in Java), allowing one company to have multiple reports over time without overwriting history.
+This table holds the financial statement numbers needed for The Magic Formula:
+- **`id BIGSERIAL PRIMARY KEY`** — Auto-incrementing unique ID.
+- **`company_id BIGINT NOT NULL`** — Connects this row to the `companies` table.
+- **`report_date DATE NOT NULL`** — The date of the financial report (`LocalDate`).
 - **Magic Formula Financial Inputs (`NUMERIC(20, 2)`):**
-  - **`ebit`** — Earnings Before Interest and Taxes (operating profit).
-  - **`enterprise_value`** — Total value of the business (market cap + debt − cash). Divided into `ebit` to calculate **Earnings Yield** (`EBIT / Enterprise Value`).
-  - **`current_assets`**, **`current_liabilities`**, & **`net_fixed_assets`** — Balance sheet figures used to calculate **Return on Capital** (`EBIT / (Net Working Capital + Net Fixed Assets)`), where `Net Working Capital = current_assets - current_liabilities`.
-- **`created_at` & `updated_at`** — Automatic timestamps recording when the metrics were first saved and last updated.
+  - **`ebit`** — Operating profit.
+  - **`enterprise_value`** — Total value of the business (market cap + debt − cash). Used with EBIT for Earnings Yield.
+  - **`current_assets`**, **`current_liabilities`**, & **`net_fixed_assets`** — Used to calculate Return on Capital.
+- **`created_at` & `updated_at`** — Automatic timestamps.
 
-#### Constraints (Database Safety Rules)
+#### Constraints
+- **`fk_financial_metrics_company_id` (`FOREIGN KEY ... ON DELETE CASCADE`)** — Enforces a strict parent-child link to `companies`.
+- **`uq_financial_metrics_company_report_date` (`UNIQUE (company_id, report_date)`)** — Guarantees a company cannot have two separate rows for the same date. Powers idempotent upserts.
 
-- **`fk_financial_metrics_company_id` (`FOREIGN KEY ... ON DELETE CASCADE`)** — Enforces a strict parent-child link: PostgreSQL will reject any metrics row whose `company_id` does not exist in `companies`. `ON DELETE CASCADE` means if a company is deleted from `companies`, all of its financial metrics are automatically cleaned up too.
-- **`uq_financial_metrics_company_report_date` (`UNIQUE (company_id, report_date)`)** — Guarantees a company cannot have two separate rows for the exact same `report_date`. This pair is also what powers idempotent upserts (`ON CONFLICT (company_id, report_date) DO UPDATE`) when re-running your batch job.
-
-#### 3. Indexes (`CREATE INDEX`)
-
-- **`idx_financial_metrics_company_id`** — Speeds up finding all reports for a specific company or joining `companies` and `financial_metrics` together.
-- **`idx_financial_metrics_report_date`** — Speeds up filtering or sorting by date (such as grabbing the most recent financial report for every stock).
 </details>
 
 <details>
 <summary><h2 style="display: inline;">3. Application Entry & DB Plumbing</h2></summary>
 
 ### 3.1 `Main.java`:
-
-`Main.java` is the front door of your application—when you run the program, Java starts executing here first. Right now, its job is to gather your database connection details and make sure your PostgreSQL tables are up to date before any data fetching begins.
-
-#### Step-by-Step Breakdown
-
-- **`static void main()`** — The starting method that Java runs when the program launches. Modern Java allows this shorter syntax instead of the older, wordier `public static void main(String[] args)`.
-- **Reading Environment Variables (`System.getenv().getOrDefault(...)`)** — Looks up your database settings (`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`) from your system or `.env` configuration—matching the exact same variables used in `docker-compose.yml`.
-  - **`getOrDefault(key, fallback)`** — A convenient safety net: if an environment variable isn't set, Java automatically falls back to the default local values (`localhost`, `5432`, `magic_formula_dev`, `postgres`, `postgres`) instead of crashing.
-- **Building the Connection Address (`jdbcUrl`)** — Combines the host, port, and database name into a standard JDBC connection string (for example, `jdbc:postgresql://localhost:5432/magic_formula_dev`). This is the address format Java's PostgreSQL driver needs to locate your database.
-- **Running Migrations (`DatabaseMigrator.migrate(...)`)** — Passes the connection URL, username, and password to `DatabaseMigrator` so Flyway automatically applies any pending SQL scripts (`V1`, `V2`, etc.) on startup, printing progress messages to the console before and after.
+`Main.java` is the front door of your application.
+- **Reading Environment Variables (`System.getenv().getOrDefault(...)`)** — Looks up your database settings (`POSTGRES_HOST`, etc.) from your system or `.env`.
+- **Building the Connection Address (`jdbcUrl`)** — Combines host, port, and database name into a JDBC connection string.
+- **Running Migrations (`DatabaseMigrator.migrate(...)`)** — Automatically applies any pending SQL scripts (`V1`, `V2`, etc.) on startup.
 
 ### 3.2 `DatabaseMigrator.java`:
-`DatabaseMigrator` is a small helper class that wraps **Flyway** so your application—and your tests—can automatically set up and update the PostgreSQL database schema with a single method call.
-
-#### Line-by-Line Breakdown
-
-- **`private DatabaseMigrator() {}`** — A private constructor prevents anyone from creating an object with `new DatabaseMigrator()`. Because this class holds no state and only provides a `static` helper method, making it impossible to instantiate signals that it is a pure utility class.
-- **`public static void migrate(String jdbcUrl, String user, String password)`** — A `static` method that can be called directly as `DatabaseMigrator.migrate(...)` from anywhere (both `Main.java` at startup and your Testcontainers tests before running SQL queries).
-- **`Flyway.configure()`** — Starts building a Flyway configuration using a step-by-step builder pattern:
-  - **`.dataSource(jdbcUrl, user, password)`** — Gives Flyway the database address and login credentials it needs to connect to PostgreSQL.
-  - **`.locations("classpath:db/migration")`** — Tells Flyway where your SQL scripts (`V1__...`, `V2__...`) live. Using `classpath:` means Flyway looks inside `src/main/resources/db/migration` once the project is compiled, so it works reliably both in IntelliJ and in a packaged application.
-  - **`.load()`** — Finishes the setup and creates the configured `Flyway` runner.
-- **`flyway.migrate()`** — Connects to PostgreSQL, checks Flyway's bookkeeping table (`flyway_schema_history`) to see which scripts have already run, and executes any new SQL migrations in numerical order (`V1`, then `V2`, and so on). If the database is already up to date, it safely does nothing.
+A utility class that wraps **Flyway**.
+- **`Flyway.configure()`** — Tells Flyway the database address and credentials, and where to find SQL scripts (`classpath:db/migration`).
+- **`flyway.migrate()`** — Connects to PostgreSQL, checks `flyway_schema_history`, and applies new SQL scripts in numerical order.
 
 ### 3.3 `DataSourceFactory.java`:
-`DataSourceFactory` sets up a **database connection pool** using **HikariCP**. Opening a brand-new network connection to PostgreSQL every time you want to run a query is slow, so this factory creates a small pool of reusable connections that your repositories can quickly borrow and return.
+Sets up a **database connection pool** using **HikariCP** so connections are efficiently reused.
+- **`setMaximumPoolSize(10)`** — Limits the pool to 10 open connections.
+- **`setMinimumIdle(2)`** — Keeps 2 connections ready even when idle.
+- **`setAutoCommit(true)`** — Queries save immediately unless manually grouped in a transaction by a repository.
 
-#### Line-by-Line Breakdown
-
-- **`private DataSourceFactory() {}`** — Prevents anyone from creating an instance with `new DataSourceFactory()`. Just like `DatabaseMigrator`, this signals that it is a pure utility class with only a `static` helper method.
-- **`public static DataSource create(String jdbcUrl, String username, String password)`** — Builds and returns a standard Java `DataSource` interface. Returning the general `DataSource` type (rather than a Hikari-specific class) keeps your repositories decoupled from HikariCP so they only depend on standard Java JDBC.
-- **`HikariConfig config = new HikariConfig();`** — Creates a settings object where you configure how the connection pool should behave:
-  - **`setJdbcUrl`, `setUsername`, `setPassword`** — Tells HikariCP where the PostgreSQL database lives and which credentials to use when opening connections.
-  - **`setMaximumPoolSize(10)`** — Limits the pool to at most 10 open database connections at the same time so your app never overwhelms PostgreSQL.
-  - **`setMinimumIdle(2)`** — Keeps at least 2 connections open and ready even when the app is idle, eliminating connection startup lag when a query runs.
-  - **`setAutoCommit(true)`** — Sets individual SQL queries to save immediately by default. When a repository needs to group many rows into a single all-or-nothing batch transaction, it temporarily turns auto-commit off (`conn.setAutoCommit(false)`) and commits manually.
-- **`return new HikariDataSource(config);`** — Starts up the live connection pool with those settings and hands it back to the caller.
 </details>
 
 <details>
 <summary><h2 style="display: inline;">4. Domain Models (Data Shapes)</h2></summary>
 
 ### 4.1 `Company.java`
-
-`Company.java` is a **Java `record`** that represents a single listed company in memory—mirroring the exact columns of the `companies` table in PostgreSQL. Using a `record` makes the data **immutable** (it cannot be accidentally changed once created) and automatically generates the constructor, getter methods (such as `company.ticker()`), `equals()`, `hashCode()`, and `toString()` without boilerplate code.
-
-#### Fields Breakdown
-
-- **`Long id`** — The database's primary key (`BIGSERIAL`). It uses the `Long` object wrapper instead of a primitive `long` so it can be `null` before the company is saved to PostgreSQL.
-- **`String ticker` & `String name`** — The stock symbol (e.g., `VOLV-B`) and full company name.
-- **`String isin`** — The 12-character International Securities Identification Number (added in `V2`) used to reliably identify the stock across different data sources.
-- **`BigDecimal marketCap`** — The company's total market value. `BigDecimal` is used instead of `double` or `float` so financial figures match PostgreSQL's `NUMERIC(20, 2)` without rounding errors.
-- **`String sector` & `String industry`** — Business classifications used later to filter out financial and utility companies when applying The Magic Formula.
-- **`String currency`** — The 3-letter trading currency code (e.g., `SEK`).
-- **`boolean isActive`** — Tracks whether the company is still actively listed on the exchange.
-- **`Instant createdAt` & `Instant updatedAt`** — Exact timestamps in UTC matching PostgreSQL's `TIMESTAMP WITH TIME ZONE` columns (`null` until the database sets them).
-
-#### Helper Method
-
-- **`public static Company create(...)`** — A convenience factory method for creating brand-new `Company` objects right after fetching them from Nasdaq Stockholm. Instead of forcing you to pass `null, ..., true, null, null` every time, it fills in `id = null`, `isActive = true`, and `createdAt / updatedAt = null` automatically until PostgreSQL generates the real values on insert.
+A **Java `record`** representing a single listed company, keeping data **immutable**.
+- **Fields:** Matches `companies` table (`id`, `ticker`, `name`, `isin`, `marketCap`, `sector`, `industry`, `currency`, `isActive`).
+- **`create(...)`** — Factory method that initializes a new company with `id = null` and `isActive = true` before saving.
 
 ### 4.2 `FinancialMetrics.java`
+A **Java `record`** holding a single financial report snapshot.
+- **Fields:** Matches `financial_metrics` table, using `BigDecimal` for precision (`ebit`, `enterpriseValue`, `currentAssets`, `currentLiabilities`, `netFixedAssets`).
+- **`create(...)`** — Factory method to initialize a new metrics object for insertion.
 
-`FinancialMetrics.java` is a **Java `record`** that holds a single financial report snapshot for a company—mirroring the exact columns of the `financial_metrics` table created in `V2`. Just like `Company`, making it a `record` keeps the financial numbers **immutable** (safe from accidental edits once loaded) and automatically provides getters, `equals()`, `hashCode()`, and `toString()`.
-
-#### Fields Breakdown
-
-- **`Long id`** — The database's primary key (`BIGSERIAL`). Uses `Long` instead of `long` so it can be `null` before PostgreSQL inserts the row and assigns an ID.
-- **`Long companyId`** — Links this financial report to its parent company (`companies.id` in the database).
-- **`LocalDate reportDate`** — The date of the financial statement (mapping to PostgreSQL's `DATE` column). Storing the date lets one company hold multiple historical reports without overwriting past data.
-- **Magic Formula Financial Inputs (`BigDecimal`)** — Uses `BigDecimal` to match PostgreSQL's `NUMERIC(20, 2)` columns with exact decimal precision:
-  - **`ebit`** — Earnings Before Interest and Taxes (operating profit).
-  - **`enterpriseValue`** — Total value of the company (market cap + debt − cash). Used with `ebit` to calculate **Earnings Yield** (`EBIT / Enterprise Value`).
-  - **`currentAssets`**, **`currentLiabilities`**, & **`netFixedAssets`** — Balance sheet numbers used to calculate **Return on Capital** (`EBIT / (Net Working Capital + Net Fixed Assets)`), where `Net Working Capital = currentAssets - currentLiabilities`.
-- **`Instant createdAt` & `Instant updatedAt`** — Exact UTC timestamps matching PostgreSQL's `TIMESTAMP WITH TIME ZONE` columns (`null` until the database sets them).
-
-#### Helper Method
-
-- **`public static FinancialMetrics create(...)`** — A convenience factory method for constructing a brand-new `FinancialMetrics` object from fetched financial data before saving it to the database. It automatically sets `id`, `createdAt`, and `updatedAt` to `null` until PostgreSQL generates them.
 </details>
 
 <details>
 <summary><h2 style="display: inline;">5. Repositories (Database Reads & Writes)</h2></summary>
 
-### 5.1 `CompanyRepository.java`
+### 5.1 `CompanyRepository.java` & `JdbcCompanyRepository.java`
+- **`upsertBatch(...)`** — Uses `ON CONFLICT (ticker) DO UPDATE` to save a list of companies efficiently in chunks of 500 inside a manual transaction (`conn.setAutoCommit(false)`).
+- **`findByTicker` & `findAllActive`** — Safely reads and maps companies from `ResultSet` to `Company` records.
 
-`CompanyRepository` is a **Java `interface`** that acts as a contract defining *what* database operations your application can perform with `Company` objects, without specifying *how* those operations are carried out. Because it lives in the `domain.repository` package, your core business logic only talks to this clean interface—staying completely decoupled from raw JDBC or PostgreSQL-specific SQL details.
-
-#### Methods Breakdown
-
-- **`void upsertBatch(List<Company> companies)`** — Saves a list of companies to the database in one efficient batch. "Upsert" (*update* + *insert*) means if a company's ticker is new, it gets inserted; if it already exists, its details are updated instead of crashing or creating duplicates.
-- **`Optional<Company> findByTicker(String ticker)`** — Looks up a single company by its stock symbol (such as `VOLV-B`). Returning an `Optional<Company>` safely forces the caller to handle the case where no matching company exists, rather than risking a `NullPointerException`.
-- **`List<Company> findAllActive()`** — Fetches all companies currently marked as active (`is_active = true`), giving The Magic Formula screener a clean list of tradable stocks to evaluate.
-
-### 5.2 `JdbcCompanyRepository.java`
-
-`JdbcCompanyRepository` is the concrete class that implements the `CompanyRepository` interface using **raw Java JDBC** to read and write `Company` records in PostgreSQL. It receives a `DataSource` (your HikariCP connection pool) through its constructor so it can borrow connections whenever a query runs.
-
-#### How Each Part Works
-
-- **`UPSERT_SQL` (Idempotent Insert or Update)**
-  - Uses `?` placeholders instead of concatenating strings, which protects against SQL injection and lets PostgreSQL reuse the compiled query plan.
-  - **`ON CONFLICT (ticker) DO UPDATE`** — If a company's `ticker` does not exist yet, PostgreSQL inserts a new row. If it already exists, PostgreSQL updates that row instead of crashing with a duplicate error.
-  - **`EXCLUDED`** — A special PostgreSQL keyword referring to the new values you just tried to insert.
-  - **`COALESCE(EXCLUDED.isin, companies.isin)`** — A safety check that keeps the existing `isin` in the database if the incoming batch happens to have `null` for that field.
-
-- **`upsertBatch(List<Company> companies)`**
-  - **Manual Transaction (`conn.setAutoCommit(false)`)** — Groups the entire list into one all-or-nothing transaction. If an error occurs midway through, `conn.rollback()` undoes the whole batch so you are never left with half-saved data; otherwise `conn.commit()` saves everything at once. The `finally` block resets auto-commit to its original state before returning the connection to the pool.
-  - **Batching (`addBatch()` & `executeBatch()`)** — Queues up `INSERT` statements in memory and sends them to PostgreSQL in chunks of 500 (`count % 500 == 0`), avoiding hundreds of slow individual network round-trips while keeping memory usage low.
-
-- **Read Methods (`findByTicker` & `findAllActive`)**
-  - Uses **`try-with-resources`** (`try (Connection ...; PreparedStatement ...; ResultSet ...)`) so database connections and query results are automatically closed the moment the method finishes, preventing connection leaks.
-  - **`findByTicker`** — Checks `if (rs.next())` and wraps the matching company in `Optional.of(...)`, returning `Optional.empty()` if no row is found.
-  - **`findAllActive`** — Loops with `while (rs.next())` to collect every company where `is_active = true` into a `List<Company>`.
-
-- **`mapRowToCompany(ResultSet rs)`**
-  - A private helper method that translates a raw database row (`ResultSet`) column-by-column into an immutable `Company` record, safely checking for `null` before converting SQL `Timestamp` objects into Java `Instant` values.
-
-### 5.3 `FinancialMetricsRepository.java`
-
-`FinancialMetricsRepository` is a **Java `interface`** that defines *what* database operations your application can perform with `FinancialMetrics` objects, without exposing *how* the SQL is written. Living in `domain.repository`, it keeps your Magic Formula calculation logic completely separate from raw JDBC and PostgreSQL details.
-
-#### Methods Breakdown
-
-- **`void upsertBatch(List<FinancialMetrics> metricsList)`** — Saves a batch of financial reports at once. If a report for that `(company_id, report_date)` combination does not exist yet, it is inserted; if it already exists, the existing numbers are updated cleanly instead of creating duplicates.
-- **`Optional<FinancialMetrics> findByCompanyIdAndReportDate(long companyId, LocalDate reportDate)`** — Looks up one specific financial report for a given company on an exact date. Returning an `Optional` forces the caller to safely handle cases where no report exists for that date, preventing `NullPointerException` bugs.
-- **`Optional<FinancialMetrics> findLatestByCompanyId(long companyId)`** — Fetches the single most recent financial report for a company (based on `report_date`). This is the primary lookup The Magic Formula screener uses to calculate each company's latest Earnings Yield and Return on Capital.
-- **`List<FinancialMetrics> findAllByCompanyId(long companyId)`** — Returns all historical financial reports stored for a specific company, useful for inspecting past quarters/years or verifying imported data.
-
-### 5.4 `JdbcFinancialMetricsRepository.java`
-
-`JdbcFinancialMetricsRepository` is the concrete class that implements the `FinancialMetricsRepository` interface using **raw Java JDBC** to save and query `FinancialMetrics` records in PostgreSQL. Just like `JdbcCompanyRepository`, it receives your HikariCP `DataSource` through its constructor so it can borrow and return database connections safely.
-
-#### How Each Part Works
-
-- **`UPSERT_SQL` (Idempotent Insert or Update)**
-  - Uses `?` placeholders to safely pass values into PostgreSQL without risking SQL injection.
-  - **`ON CONFLICT (company_id, report_date) DO UPDATE`** — Relies on the unique constraint from `V2`. If a financial report for that company and date doesn't exist yet, PostgreSQL inserts a new row; if it already exists, PostgreSQL updates the numbers in place instead of crashing or creating duplicates.
-  - **`EXCLUDED`** — Refers to the incoming values from your batch so PostgreSQL can overwrite the old figures (`ebit`, `enterprise_value`, etc.) and refresh `updated_at`.
-
-- **`upsertBatch(List<FinancialMetrics> metricsList)`**
-  - **Guard Clause (`metricsList == null || metricsList.isEmpty()`)** — Exits immediately if there is nothing to save, avoiding unnecessary database connections.
-  - **All-or-Nothing Transaction (`conn.setAutoCommit(false)`)** — Wraps the entire batch in a single transaction. If anything fails partway through, `conn.rollback()` cancels the whole batch so you never end up with half-saved financial reports; otherwise `conn.commit()` saves everything at once.
-  - **Chunked Batching (`addBatch()` & `executeBatch()`)** — Queues SQL statements in memory and sends them to PostgreSQL in chunks of 500 (`count % 500 == 0`), keeping network overhead and memory usage low.
-
-- **Read Methods**
-  - **`findByCompanyIdAndReportDate`** — Filters by both `company_id` and `report_date` (converting Java's `LocalDate` via `Date.valueOf(...)`) and wraps the result in an `Optional`.
-  - **`findLatestByCompanyId`** — Uses `ORDER BY report_date DESC LIMIT 1` to sort a company's reports from newest to oldest and grab only the top row—giving The Magic Formula the most up-to-date numbers.
-  - **`findAllByCompanyId`** — Uses `ORDER BY report_date ASC` and loops with `while (rs.next())` to collect a company's entire financial history in chronological order.
-
-- **Helper Methods**
-  - **`setNullableBigDecimal(...)`** — Financial statements sometimes have missing (`null`) figures. This helper checks for `null` and explicitly calls `ps.setNull(paramIndex, Types.NUMERIC)` so PostgreSQL knows the exact column type of the empty value.
-  - **`mapRowToFinancialMetrics(ResultSet rs)`** — Converts a raw database row (`ResultSet`) into an immutable `FinancialMetrics` record, safely checking for `null` before converting SQL `Date` and `Timestamp` values into Java's `LocalDate` and `Instant`.
+### 5.2 `FinancialMetricsRepository.java` & `JdbcFinancialMetricsRepository.java`
+- **`upsertBatch(...)`** — Uses `ON CONFLICT (company_id, report_date) DO UPDATE` to update or insert financial statements idempotently.
+- **`findLatestByCompanyId`** — Sorts reports by `report_date DESC LIMIT 1` to give the screener the most up-to-date figures.
 
 </details>
 
 <details>
 <summary><h2 style="display: inline;">6. External API Client & Mappers</h2></summary>
 
-### 6.1 `CompanyProfileDto.java`
+### 6.1 `RoicListResponse.java`
+`RoicListResponse.java` lives in `io.github.simeonfarkas.infrastructure.client.dto` and is a generic **Java `record`** used to handle ROIC.AI's API format, which wraps lists inside a data object (`{ "data": [ {...} ] }`).
 
-`CompanyProfileDto.java` lives in `io.github.simeonfarkas.infrastructure.client.dto` and is a **Java `record`** that represents the raw JSON payload returned by the external stock API's company profile endpoint. Keeping it inside `infrastructure` prevents third-party API field names from leaking into your `domain` layer, while making it a `record` keeps the incoming API data **immutable** and automatically generates its constructor, getters (`dto.symbol()`), `equals()`, `hashCode()`, and `toString()`.
-
-#### Annotation & Fields Breakdown
-
-- **`@JsonIgnoreProperties(ignoreUnknown = true)`** — External stock APIs typically return dozens of extra fields (such as CEO name, phone number, or website URL) that your screener does not need. This Jackson annotation tells the parser to silently skip any JSON properties that do not have a matching field in the record instead of crashing.
-- **`@JsonProperty("symbol") String symbol`** — Maps the JSON `"symbol"` key to the stock ticker string (often formatted with an exchange suffix like `"VOLV-B.ST"`).
-- **`@JsonProperty("companyName") String companyName`** — Maps `"companyName"` to the company's full display name.
-- **`@JsonProperty("isin") String isin`** — Maps `"isin"` to the 12-character International Securities Identification Number (such as `"SE0000115446"`).
-- **`@JsonProperty("mktCap") BigDecimal marketCap`** — Maps the API's abbreviated `"mktCap"` key to `marketCap` using `BigDecimal` so large market capitalizations keep exact decimal precision without `double` or `float` rounding errors.
-- **`@JsonProperty("sector") String sector` & `@JsonProperty("industry") String industry`** — Maps the company's business classifications, which will later be used to exclude financial and utility stocks from The Magic Formula screen.
-- **`@JsonProperty("currency") String currency`** — Maps `"currency"` to the 3-letter trading currency code (such as `"SEK"`).
-
-### 6.2 `FinancialReportDto.java`
-
-`FinancialReportDto.java` lives in `io.github.simeonfarkas.infrastructure.client.dto` and is an **immutable Java `record`** representing a single financial statement payload from the external API. It contains zero business math or Magic Formula logic—its sole job is to capture the raw JSON fields cleanly so `FinancialMetricsMapper` can validate and transform them later.
-
-#### Annotation & Fields Breakdown
-
-- **`@JsonIgnoreProperties(ignoreUnknown = true)`** — Safely ignores all unmapped lines on the income statement and balance sheet so API schema additions never break JSON parsing.
-- **`@JsonProperty("date") LocalDate reportDate`** — Maps `"date"` (such as `"2025-12-31"`) directly into Java's `LocalDate` using Jackson's `JavaTimeModule`.
-- **`@JsonProperty("operatingIncome") BigDecimal operatingIncome`** — Maps `"operatingIncome"`, which represents operating profit before interest and taxes (later mapped to `ebit` in your domain model).
-- **`@JsonProperty("totalCurrentAssets") BigDecimal totalCurrentAssets`** — Maps total short-term assets from the balance sheet (cash, receivables, inventory, etc.).
-- **`@JsonProperty("totalCurrentLiabilities") BigDecimal totalCurrentLiabilities`** — Maps total short-term obligations due within one year, needed alongside `totalCurrentAssets` to calculate Net Working Capital.
-- **`@JsonProperty("propertyPlantEquipmentNet") BigDecimal netFixedAssets`** — Maps net property, plant, and equipment (long-term physical assets after depreciation).
-- **`@JsonProperty("cashAndShortTermInvestments") BigDecimal cashAndShortTermInvestments`** — Maps liquid cash and short-term marketable securities, used when calculating Enterprise Value.
-- **`@JsonProperty("totalDebt") BigDecimal totalDebt`** — Maps the company's combined short-term and long-term debt, also used when calculating Enterprise Value.
+### 6.2 The Data Transfer Objects (DTOs)
+These records map ROIC.AI's JSON keys exactly. `@JsonIgnoreProperties(ignoreUnknown = true)` ensures the parser doesn't crash if the API adds new fields.
+- **`CompanyProfileDto`** — Maps `primary_symbol`, `name`, `isin`, `sector`, `industry`, `fundamental_currency`.
+- **`IncomeStatementDto`** — Maps `period_end_date` (via Jackson's `JavaTimeModule`) and `ebit`.
+- **`BalanceSheetDto`** — Maps `bs_cur_asset_report`, `bs_cur_liab`, `bs_net_fix_asset`, `bs_c_and_ce_and_sti_detailed` (cash), and debt fields.
+- **`ValuationMultipleDto`** — Maps `enterprise_value`, `pr_last` (price), and `bs_sh_out` (shares).
 
 ### 6.3 `CompanyMapper.java`
-
-`CompanyMapper.java` lives in `io.github.simeonfarkas.infrastructure.client.mapper` and acts as a translation layer between the external `CompanyProfileDto` and your internal `Company` domain model. Isolating this conversion keeps external API formatting quirks out of both your domain records and your HTTP client.
-
-#### Line-by-Line Breakdown
-
-- **`private CompanyMapper() {}`** — A private constructor prevents anyone from creating an instance with `new CompanyMapper()`. Just like `DatabaseMigrator`, this signals that the class holds no state and is a pure utility class with only a `static` helper method.
-- **`public static Company toDomain(CompanyProfileDto dto)`** — Converts an incoming profile DTO into a domain `Company` object:
-  - **Null Guard (`if (dto == null) return null;`)** — Exits safely if no DTO was passed in instead of throwing a `NullPointerException`.
-  - **Ticker Normalization (`dto.symbol().replace(".ST", "").trim()`)** — Many market data providers append `.ST` to Nasdaq Stockholm tickers (such as `"VOLV-B.ST"`), whereas your `V1` database schema expects `"VOLV-B"` (`VARCHAR(12)`). This strips `.ST` and trims whitespace (checking `dto.symbol() != null` first) so tickers stay consistent across the app.
-  - **`Company.create(...)`** — Passes the cleaned fields into your domain factory method, which automatically sets `id = null`, `isActive = true`, and `createdAt / updatedAt = null` until PostgreSQL generates them on insert.
+Translates external DTOs into your `Company` domain model.
+- **Ticker Normalization** — Strips the `STO:` prefix from ROIC.AI symbols (e.g., `"STO:VOLV_B"` $\rightarrow$ `"VOLV_B"`).
+- **`calculateMarketCap`** — Multiplies `lastPrice` by `sharesOutstanding`.
 
 ### 6.4 `FinancialMetricsMapper.java`
-
-`FinancialMetricsMapper.java` lives in `io.github.simeonfarkas.infrastructure.client.mapper` and converts a raw `FinancialReportDto` into a `FinancialMetrics` domain record. Because Magic Formula calculations combine balance sheet figures with market valuation, this mapper takes both the financial report DTO and its parent `Company` record.
-
-#### How Each Part Works
-
-- **`private FinancialMetricsMapper() {}`** — Prevents instantiation with `new FinancialMetricsMapper()`, marking it as a stateless utility class.
-- **`public static FinancialMetrics toDomain(FinancialReportDto dto, Company company)`**
-  - **Null Guard (`if (dto == null || company == null) return null;`)** — Ensures both the financial report and parent company exist before attempting any calculation or field access.
-  - **Connecting Company Context (`company.id()` & `company.marketCap()`)** — Uses `company.id()` to link the metrics row to its parent company in PostgreSQL (`fk_financial_metrics_company_id`), and passes `company.marketCap()` into `calculateEnterpriseValue(...)`.
-  - **`FinancialMetrics.create(...)`** — Translates `dto.operatingIncome()` into your domain's `ebit` field and constructs an immutable `FinancialMetrics` record ready for batch upserting.
-- **`calculateEnterpriseValue(BigDecimal marketCap, BigDecimal totalDebt, BigDecimal cashAndShortTermInvestments)`**
-  - **The Formula ($\text{Market Cap} + \text{Total Debt} - \text{Cash}$)** — Computes the theoretical takeover price of the business by adding debt you would inherit and subtracting cash sitting on the balance sheet.
-  - **Missing Market Cap Check (`if (marketCap == null) return null;`)** — If a company's market cap is missing, returning `null` (which `JdbcFinancialMetricsRepository.setNullableBigDecimal` saves as SQL `NULL`) is critical: returning `BigDecimal.ZERO` instead would cause division-by-zero or falsely rank the stock as infinitely cheap when computing Earnings Yield (`EBIT / Enterprise Value`).
-  - **Null-Safe Debt & Cash (`Objects.requireNonNullElse(..., BigDecimal.ZERO)`)** — If an API omits `totalDebt` or `cashAndShortTermInvestments` (common for debt-free companies), this safely substitutes `BigDecimal.ZERO` instead of crashing with a `NullPointerException` or throwing away a valid `marketCap`.
+Translates the three financial DTOs into a single `FinancialMetrics` domain record.
+- **Enterprise Value Fallback** — Uses ROIC.AI's pre-calculated `enterpriseValue` if available. If missing, computes it manually ($\text{Market Cap} + \text{Total Debt} - \text{Cash}$), substituting zero for missing debt or cash fields safely.
 
 ### 6.5 `StockDataApiClient.java`
-
-`StockDataApiClient.java` lives in `io.github.simeonfarkas.infrastructure.client` and handles outbound HTTP requests to your external stock data provider using **Java 21's built-in `HttpClient`** and **Jackson's `ObjectMapper`**. By handling network calls, JSON parsing, and domain mapping inside this class, the rest of your application only ever interacts with clean `Company` and `FinancialMetrics` objects.
-
-#### Step-by-Step Breakdown
-
-- **Fields & Constructor (`StockDataApiClient(String baseUrl, String apiKey)`)**
-  - **`Logger log = LoggerFactory.getLogger(...)`** — Sets up SLF4J logging so HTTP errors and warnings are recorded through your configured Logback setup rather than printed raw to the console.
-  - **`HttpClient.newBuilder()`** — Builds a reusable, thread-safe Java 21 HTTP client configured for `HTTP_2` with a 10-second connection timeout (`Duration.ofSeconds(10)`) so a stalled external server cannot hang your application indefinitely.
-  - **`new ObjectMapper().registerModule(new JavaTimeModule())`** — Creates a configured Jackson parser and registers `JavaTimeModule` so Jackson knows how to deserialize ISO date strings (`"2025-12-31"`) into Java `LocalDate` objects.
-
-- **`fetchCompanyProfile(String ticker)`**
-  - **Building & Sending the Request (`HttpRequest` & `httpClient.send(...)`)** — Builds a `GET` request to `<baseUrl>/profile/<ticker>?apikey=<apiKey>` and sends it synchronously, reading the response body as a `String` via `HttpResponse.BodyHandlers.ofString()`.
-  - **Status Code Check (`response.statusCode() != 200`)** — Verifies that the server returned `200 OK` before attempting to parse JSON. If the API returns an error (such as `401 Unauthorized` or `429 Too Many Requests`), it logs a warning and returns `Optional.empty()`.
-  - **Deserializing Generic Lists (`new TypeReference<>() {}`)** — Because Java erases generic type information at runtime (turning `List<CompanyProfileDto>` into a plain `List`), passing an anonymous `TypeReference` tells Jackson the exact DTO class inside the list so it can parse the JSON array properly.
-  - **Extracting & Mapping (`dtoList.getFirst()` & `CompanyMapper.toDomain(...)`)** — Checks `dtoList.isEmpty()` to guard against empty `[]` responses, grabs the first item using Java 21's `getFirst()`, and wraps the mapped `Company` in `Optional.ofNullable(...)`.
-
-- **`fetchLatestFinancials(Company company)`**
-  - Follows the same `GET` $\rightarrow$ status check $\rightarrow$ Jackson deserialization pipeline against `<baseUrl>/financials/<company.ticker()>?apikey=<apiKey>`, then passes `dtoList.getFirst()` together with `company` into `FinancialMetricsMapper.toDomain(...)`.
-
-- **Exception & Thread Interrupt Handling (`catch (Exception e)`)**
-  - **Restoring Interrupt Status (`if (e instanceof InterruptedException) Thread.currentThread().interrupt();`)** — `httpClient.send(...)` throws `InterruptedException` if the thread is cancelled while waiting for a network response. Catching that exception clears Java's internal interrupted flag on the thread, so calling `Thread.currentThread().interrupt()` restores the flag so upstream code still knows a cancellation was requested.
-  - **Graceful Failure (`log.error(...)` & `Optional.empty()`)** — Logs the full exception stack trace via SLF4J and returns `Optional.empty()` so a network glitch on a single stock doesn't abort your entire batch import.
+Handles outbound HTTP requests using **Java 21's `HttpClient`**.
+- **Rate Limiting** — Enforces a 12.5-second pause (`waitForRateLimit`) between requests to stay under ROIC.AI's free tier cap of 5 requests/minute.
+- **`getJson`** — Centralizes HTTP `GET`, the `Authorization: Bearer <apiKey>` header, and error logging.
+- **`fetchLatestFinancials`** — Sequentially calls the income statement, balance sheet, and multiples endpoints, extracts the first item from the `RoicListResponse`, and maps them into a single `FinancialMetrics` record.
 
 </details>
 
@@ -385,20 +209,9 @@ This table holds the financial statement numbers needed to calculate **The Magic
 <summary><h2 style="display: inline;">7. Tests</h2></summary>
 
 ### 7.1 `JdbcCompanyRepositoryTest.java`
-
-`JdbcCompanyRepositoryTest` is an **integration test** that verifies your SQL queries against a real PostgreSQL database instead of faking database responses. Using **Testcontainers**, it automatically spins up a temporary Docker container for PostgreSQL when the test starts and deletes it when the test finishes—keeping your development database untouched.
-
-#### Step-by-Step Breakdown
-
-- **`@Testcontainers` & `@Container`** — Tells JUnit 5 to manage the lifecycle of a throwaway `postgres:16-alpine` Docker container (`test_db`). Docker assigns it a random available port automatically so it never clashes with your `mfs-postgres` development container.
-- **`@BeforeAll` (`beforeAll()`)** — Runs once before any test method starts:
-  - Calls `DatabaseMigrator.migrate(...)` using the container's dynamic `getJdbcUrl()`, running your exact Flyway scripts (`V1` and `V2`) to create the real tables and constraints.
-  - Creates a HikariCP `DataSource` connected to that temporary database via `DataSourceFactory.create(...)`.
-- **`@BeforeEach` (`setUp()`)** — Runs before each individual `@Test` method, creating a clean `JdbcCompanyRepository` instance wired to the test `DataSource`.
-- **`@Test` (`should_Upsert_And_Handle_Duplicates_Idempotently()`)** — Tests that running a batch insert twice with the same stock ticker updates the existing row instead of crashing or creating duplicates:
-  1. **Initial Insert:** Creates `VOLV-B` (`"Volvo AB"`, market cap `500000000`) and saves it with `upsertBatch(...)`.
-  2. **First Check:** Calls `findByTicker("VOLV-B")` and uses `assertTrue` and `assertEquals` to verify the company was saved.
-  3. **Idempotent Upsert:** Creates a second `Company` object with the same `VOLV-B` ticker, a new name (`"Volvo Group AB"`), and an updated market cap (`520000000`), then calls `upsertBatch(...)` again.
-  4. **Final Check:** Fetches `VOLV-B` again to confirm the name and market cap were updated in place. (`compareTo(...) == 0` is used for `BigDecimal` so numbers like `520000000` and `520000000.00` compare as equal regardless of decimal scale.)
+An **integration test** that verifies SQL against a real PostgreSQL database using **Testcontainers**.
+- **`@Testcontainers`** — Spins up a temporary `postgres:16-alpine` Docker container.
+- **`DatabaseMigrator.migrate(...)`** — Runs Flyway on the temporary container before testing begins.
+- **`should_Upsert_And_Handle_Duplicates_Idempotently()`** — Tests that running a batch insert twice updates the existing row instead of crashing.
 
 </details>
