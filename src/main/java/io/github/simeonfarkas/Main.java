@@ -1,9 +1,8 @@
 package io.github.simeonfarkas;
 
+import io.github.simeonfarkas.infrastructure.client.StockDataApiClient;
 import io.github.simeonfarkas.infrastructure.database.DatabaseMigrator;
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
 public class Main {
     static void main() {
         String dbHost = System.getenv().getOrDefault("POSTGRES_HOST", "localhost");

@@ -198,11 +198,65 @@ Translates the three financial DTOs into a single `FinancialMetrics` domain reco
 - **Enterprise Value Fallback** — Uses ROIC.AI's pre-calculated `enterpriseValue` if available. If missing, computes it manually ($\text{Market Cap} + \text{Total Debt} - \text{Cash}$), substituting zero for missing debt or cash fields safely.
 
 ### 6.5 `StockDataApiClient.java`
-Handles outbound HTTP requests using **Java 21's `HttpClient`**.
-- **Rate Limiting** — Enforces a 12.5-second pause (`waitForRateLimit`) between requests to stay under ROIC.AI's free tier cap of 5 requests/minute.
-- **`getJson`** — Centralizes HTTP `GET`, the `Authorization: Bearer <apiKey>` header, and error logging.
-- **`fetchLatestFinancials`** — Sequentially calls the income statement, balance sheet, and multiples endpoints, extracts the first item from the `RoicListResponse`, and maps them into a single `FinancialMetrics` record.
+`StockDataApiClient.java` lives in `io.github.simeonfarkas.infrastructure.client`. Think of it as your application's dedicated messenger to ROIC.AI: it formats stock tickers, obeys API speed limits, sends HTTP requests over the internet, checks for errors, and translates raw JSON text into clean Java domain objects (`Company` and `FinancialMetrics`).
 
+---
+
+#### 1. Class Fields (The Client's Tools & Memory)
+At the top of the class, we declare the tools and settings the client needs to keep in memory while running:
+- **`private static final Logger log = LoggerFactory.getLogger(StockDataApiClient.class);`** — Creates a logger for this class so warnings and errors are printed with timestamps and severity levels (`WARN`, `ERROR`) instead of plain `System.out.println`.
+- **`private static final long RATE_LIMIT_DELAY_MS = 12_500L;`** — A constant (`static final`) defining the minimum pause between API calls in milliseconds (`12,500 ms = 12.5 seconds`). The underscore in `12_500L` is just a Java readability feature (like writing `12,500`), and `L` marks it as a `long` number.
+- **`private final HttpClient httpClient;`** — Java 21's built-in HTTP engine. It acts like a headless web browser inside your code that can send requests to URLs and receive responses.
+- **`private final ObjectMapper objectMapper;`** — Jackson's JSON translator. It reads raw JSON strings returned by ROIC.AI and populates your DTO `record` classes automatically.
+- **`private final String baseUrl;` & `private final String apiKey;`** — Stores the API root address (`https://api.roic.ai/v3.0.0`) and your secret API key, passed in from `Main.java` so no secrets are hardcoded in this file.
+- **`private long lastRequestTime = 0L;`** — Acts as a stopwatch. It remembers the exact timestamp (in milliseconds) of the previous API request so the client knows how long it needs to wait before making the next one.
+
+---
+
+#### 2. Constructor (`public StockDataApiClient(String baseUrl, String apiKey)`)
+Runs once when you create `new StockDataApiClient(...)` in `Main.java`:
+- **`this.baseUrl = baseUrl;`** & **`this.apiKey = apiKey;`** — Saves the URL and key into the class fields above.
+- **`this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();`** — Builds the HTTP client and tells it to give up if ROIC.AI takes more than 10 seconds just to establish a connection (preventing your program from freezing indefinitely on a dead network).
+- **`this.objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());`** — Creates the JSON parser and plugs in `JavaTimeModule`. Without this module, Jackson does not know how to convert JSON date text like `"2025-12-31"` into a Java `LocalDate` object and will crash.
+
+---
+
+#### 3. Fetching the Company Profile (`fetchCompanyProfile(String ticker)`)
+This public method takes a ticker (like `"VOLV_B"` or `"NASDAQ:AAPL"`) and returns `Optional<Company>` (a container that either holds a `Company` or is empty if something went wrong):
+1. **`String symbol = toRoicSymbol(ticker);`** — Cleans the ticker and adds `STO:` if no exchange prefix is present (e.g., `"volv_b"` $\rightarrow$ `"STO:VOLV_B"`).
+2. **`String url = baseUrl + "/company/profile/" + symbol;`** — Glues together the full endpoint address: `https://api.roic.ai/v3.0.0/company/profile/STO:VOLV_B`.
+3. **`Optional<RoicListResponse<CompanyProfileDto>> response = getJson(url, new TypeReference<>() {});`**
+  - Sends the HTTP request via `getJson(...)`.
+  - **Why `new TypeReference<>() {}` is needed:** Because of a Java quirk called *type erasure*, Java forgets at runtime what type is inside `<...>`. Passing an anonymous `TypeReference` subclass preserves the nested generic structure (`RoicListResponse` containing `CompanyProfileDto`) so Jackson knows which record fields to populate.
+4. **Unwrapping & Mapping:**
+  - Checks if `response` is empty or if `response.get().data()` has no items. If nothing came back, it returns `Optional.empty()`.
+  - Otherwise, grabs the first item (`data().get(0)`) and calls `CompanyMapper.toDomain(profile, null, symbol)`.
+  - **Why `null` is passed as the second argument:** ROIC.AI's `/company/profile` endpoint only returns static company metadata (name, ISIN, sector, industry, currency)—it does *not* include share price or share count. Because those numbers aren't fetched until `fetchLatestFinancials`, `Company.marketCap` is set to `null` at this stage.
+5. **`catch (Exception e)`** — Wraps the entire method in a `try/catch` block. If the network drops or JSON parsing fails for one company, it logs the error and returns `Optional.empty()` instead of crashing the entire screener run.
+
+---
+
+#### 4. Fetching Financial Statements (`fetchLatestFinancials(Company company)`)
+Takes an already-fetched `Company` and makes **three sequential API calls** to gather all numbers required by The Magic Formula (~37.5 seconds total because of the 12.5-second pause before each call):
+1. **Call 1 — Income Statement:** Queries `/fundamental/income-statement/{symbol}?cadence=annual&limit=1` to get `ebit` (operating profit) and `period_end_date`.
+2. **Call 2 — Balance Sheet:** Queries `/fundamental/balance-sheet/{symbol}?cadence=annual&limit=1` to get `currentAssets`, `currentLiabilities`, `netFixedAssets`, cash, and debt.
+3. **Call 3 — Valuation Multiples:** Queries `/fundamental/multiples/{symbol}?cadence=annual&limit=1` to get `enterpriseValue`, `lastPrice`, and `sharesOutstanding`.
+- **Early Exit Checks:** After each call, if the response or its `.data()` list is empty, the method immediately stops and returns `Optional.empty()` rather than wasting time on incomplete data.
+- **Combining the Reports:** Once all three DTOs (`income`, `balance`, `multiples`) are retrieved, it passes their first elements into `FinancialMetricsMapper.toDomain(...)`, which calculates `enterpriseValue` (using ROIC's value or computing it manually as a fallback) and returns `Optional<FinancialMetrics>`.
+
+---
+
+#### 5. The Reusable HTTP & JSON Helper (`getJson(String url, TypeReference<T> responseType)`)
+Instead of repeating HTTP setup code in every method, all endpoints call this private helper:
+- **`private <T> Optional<T>`** — The `<T>` makes this a *generic method*: `T` acts as a placeholder type, allowing the exact same method to return `CompanyProfileDto` in one call and `BalanceSheetDto` in the next.
+- **`waitForRateLimit();`** — Pauses execution if the previous API call happened less than 12.5 seconds ago.
+- **Building the Request:**
+  ```java
+  HttpRequest request = HttpRequest.newBuilder()
+          .uri(URI.create(url))
+          .header("Authorization", "Bearer " + apiKey)
+          .GET()
+          .build();
 </details>
 
 <details>
