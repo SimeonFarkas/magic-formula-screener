@@ -124,7 +124,7 @@ public class StockDataApiClient {
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
         if (response.statusCode() != 200) {
-            log.warn("ROIC.AI request failed ({}) - HTTP {}", url, response.statusCode());
+            log.warn("ROIC.AI request failed ({}) - HTTP {} - Body: {}", url, response.statusCode(), response.body());
             return Optional.empty();
         }
 
