@@ -30,9 +30,11 @@
 - `FinancialMetricsMapper.java` — How the three financial report DTOs are combined to compute `enterpriseValue` and create `FinancialMetrics`.
 - `StockDataApiClient.java` — Line-by-line breakdown of Java 21's `HttpClient`, Jackson deserialization, rate limiting (12.5s pauses), and error handling.
 
-### 7. Tests
-- `JdbcCompanyRepositoryTest.java` — How Testcontainers spins up a temporary Postgres DB to test our SQL.
+### 7. Application Services (Ingestion & Validation)
+- `DataIngestionService.java` — How the fetching, validation, ID resolution, and isolated per-company saving pipeline works.
 
+### 8. Tests
+- `JdbcCompanyRepositoryTest.java` — How Testcontainers spins up a temporary Postgres DB to test our SQL.
 ---
 
 <details>
@@ -260,7 +262,52 @@ Instead of repeating HTTP setup code in every method, all endpoints call this pr
 </details>
 
 <details>
-<summary><h2 style="display: inline;">7. Tests</h2></summary>
+<summary><h2 style="display: inline;">7. Application Services (Ingestion & Validation)</h2></summary>
+
+### 7.1 `DataIngestionService.java`
+`DataIngestionService.java` lives in `io.github.simeonfarkas.application.service`. If `StockDataApiClient` is the messenger and the repositories are the storage clerks, `DataIngestionService` is the **orchestrator** (project manager) that coordinates the entire pipeline from raw stock ticker to validated database records.
+
+---
+
+#### 1. Dependencies & Constructor
+The service connects three components through constructor injection:
+- **`StockDataApiClient apiClient`** — Fetches company profiles and financial statements from ROIC.AI.
+- **`CompanyRepository companyRepository`** — Saves and retrieves `Company` records in PostgreSQL.
+- **`FinancialMetricsRepository metricsRepository`** — Saves `FinancialMetrics` snapshots linked to each company.
+- **`IngestionSummary` (`record`)** — A lightweight return object (`total`, `succeeded`, `skipped`, `failed`) that gives `Main.java` a clear report of how the batch run went.
+
+---
+
+#### 2. Batch Loop & Fault Isolation (`ingestTickers(List<String> tickers)`)
+Instead of wrapping the entire list of 300+ Nasdaq Stockholm companies in one giant database transaction, `ingestTickers` processes **one ticker at a time** inside a `try/catch` block:
+1. **Blank Check:** Ignores `null` or empty ticker strings immediately (`skipped++`).
+2. **Isolated Execution (`processSingleTicker`):** Calls the 4-step pipeline for a single company.
+3. **Failure Containment:** If an unexpected exception occurs for one company (such as a malformed response or database constraint issue), the `catch` block logs the error, increments `failed`, and **continues with the remaining tickers** instead of aborting the entire batch. Because each company takes ~50 seconds due to ROIC.AI's rate limit, saving per company also ensures progress is never lost mid-run.
+
+---
+
+#### 3. The 4-Step Pipeline (`processSingleTicker(String ticker)`)
+For each ticker, the service executes four steps in strict order:
+1. **Fetch & Validate Profile:** Calls `apiClient.fetchCompanyProfile(ticker)` and runs `isValidCompany(...)`. If the company is missing or inactive, it logs a warning and skips it early—saving 3 unnecessary financial API calls (~37.5 seconds).
+2. **Persist Company & Resolve Database ID:**
+  - Calls `companyRepository.upsertBatch(List.of(fetchedCompany))` to insert or update the company in PostgreSQL.
+  - Immediately calls `companyRepository.findByTicker(...)` to fetch the saved record back. **Why?** A newly created `Company` from the API has `id = null`, and PostgreSQL generates the primary key (`BIGSERIAL`) upon insert. `FinancialMetrics` requires that exact `companyId` foreign key before it can be saved.
+3. **Fetch & Validate Financials:** Passes `persistedCompany` (now complete with its database `id`) into `apiClient.fetchLatestFinancials(...)`, then checks the result with `isValidMetrics(...)`.
+4. **Persist Metrics:** Saves the validated snapshot via `metricsRepository.upsertBatch(List.of(metrics))` in its own isolated JDBC transaction.
+
+---
+
+#### 4. Data Quality & Validation Rules
+Before anything touches the database, two gatekeeper methods ensure incomplete or delisted companies never pollute your Magic Formula rankings:
+- **`isValidCompany(Company company)`** — Rejects companies where `isActive` is `false`, or where `ticker`, `name`, or `currency` is missing/blank.
+- **`isValidMetrics(FinancialMetrics metrics)`** — Rejects financial snapshots missing `reportDate` or any of the five core Magic Formula inputs:
+  - **`ebit` & `enterpriseValue`** — Required to compute **Earnings Yield** ($\text{EBIT} / \text{Enterprise Value}$).
+  - **`currentAssets`, `currentLiabilities`, & `netFixedAssets`** — Required to compute **Return on Capital** ($\text{EBIT} / (\text{Net Working Capital} + \text{Net Fixed Assets})$).
+
+</details>
+
+<details>
+<summary><h2 style="display: inline;">8. Tests</h2></summary>
 
 ### 7.1 `JdbcCompanyRepositoryTest.java`
 An **integration test** that verifies SQL against a real PostgreSQL database using **Testcontainers**.
